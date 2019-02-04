@@ -285,17 +285,24 @@ int ff_v4l2_request_init(AVCodecContext *avctx, uint32_t pixelformat, uint32_t b
     struct media_device_info device_info = {0};
     struct v4l2_capability capability = {0};
     unsigned int capabilities = 0;
+    const char *video_path = getenv("FFMPEG_V4L2_REQUEST_VIDEO_PATH");
+    const char *media_path = getenv("FFMPEG_V4L2_REQUEST_MEDIA_PATH");
+
+    if (!video_path)
+	    video_path = V4L2_REQUEST_VIDEO_PATH;
+    if (!media_path)
+	    media_path = V4L2_REQUEST_MEDIA_PATH;
 
     av_log(avctx, AV_LOG_DEBUG, "%s: avctx=%p ctx=%p hw_device_ctx=%p hw_frames_ctx=%p\n", __func__, avctx, ctx, avctx->hw_device_ctx, avctx->hw_frames_ctx);
 
-    ctx->video_fd = open(V4L2_REQUEST_VIDEO_PATH, O_RDWR | O_NONBLOCK, 0);
+    ctx->video_fd = open(video_path, O_RDWR | O_NONBLOCK, 0);
     if (ctx->video_fd < 0) {
         av_log(avctx, AV_LOG_ERROR, "%s: opening %s failed, %s (%d)\n", __func__, V4L2_REQUEST_VIDEO_PATH, strerror(errno), errno);
         ret = AVERROR(EINVAL);
         goto fail;
     }
 
-    ctx->media_fd = open(V4L2_REQUEST_MEDIA_PATH, O_RDWR | O_NONBLOCK, 0);
+    ctx->media_fd = open(media_path, O_RDWR | O_NONBLOCK, 0);
     if (ctx->media_fd < 0) {
         av_log(avctx, AV_LOG_ERROR, "%s: opening %s failed, %s (%d)\n", __func__, V4L2_REQUEST_MEDIA_PATH, strerror(errno), errno);
         ret = AVERROR(EINVAL);

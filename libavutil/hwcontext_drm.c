@@ -44,8 +44,10 @@ static int drm_device_create(AVHWDeviceContext *hwdev, const char *device,
     drmVersionPtr version;
 
     hwctx->fd = open(device, O_RDWR);
-    if (hwctx->fd < 0)
+    if (hwctx->fd < 0) {
+        av_log(hwdev, AV_LOG_ERROR, "Failed to open device %s\n", device);
         return AVERROR(errno);
+    }
 
     version = drmGetVersion(hwctx->fd);
     if (!version) {
