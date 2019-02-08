@@ -29,6 +29,8 @@ typedef struct V4L2RequestControlsH264 {
     struct v4l2_ctrl_h264_slice_param slice_params;
 } V4L2RequestControlsH264;
 
+static char nalu_slice_start_code[] = { 0x00, 0x00, 0x00, 0x01 };
+
 static void fill_weight_factors(struct v4l2_h264_weight_factors *factors, int list, const H264SliceContext *sl)
 {
     for (int i = 0; i < sl->ref_count[list]; i++) {
@@ -98,8 +100,7 @@ static uint8_t get_dpb_index(struct v4l2_ctrl_h264_decode_param *decode, const H
         struct v4l2_h264_dpb_entry *entry = &decode->dpb[i];
         if ((entry->flags & V4L2_H264_DPB_ENTRY_FLAG_VALID) &&
             entry->timestamp == timestamp)
-            // TODO: signal reference type, possible using top 2 bits
-            return i | ((ref->reference & 3) << 6);
+            return i;
     }
 
     return 0;
@@ -199,9 +200,6 @@ static int v4l2_request_h264_start_frame(AVCodecContext *avctx,
         .nal_ref_idc = h->nal_ref_idc,
         .top_field_order_cnt = h->cur_pic_ptr->field_poc[0],
         .bottom_field_order_cnt = h->cur_pic_ptr->field_poc[1],
-        //.ref_pic_list_p0[32]  - not required? not set by libva-v4l2-request
-        //.ref_pic_list_b0[32]  - not required? not set by libva-v4l2-request
-        //.ref_pic_list_b1[32]  - not required? not set by libva-v4l2-request
     };
 
     fill_dpb(&controls->decode_params, h);
@@ -255,7 +253,7 @@ static int v4l2_request_h264_decode_slice(AVCodecContext *avctx, const uint8_t *
     const H264SliceContext *sl = &h->slice_ctx[0];
     V4L2RequestControlsH264 *controls = h->cur_pic_ptr->hwaccel_picture_private;
     V4L2RequestDescriptor *req = (V4L2RequestDescriptor*)h->cur_pic_ptr->f->data[0];
-    int i, count;
+    int i, count, ret;
 
     // HACK: trigger decode per slice
     if (req->output.used) {
@@ -310,18 +308,35 @@ static int v4l2_request_h264_decode_slice(AVCodecContext *avctx, const uint8_t *
     controls->slice_params.pred_weight_table.chroma_log2_weight_denom = sl->pwt.chroma_log2_weight_denom;
     controls->slice_params.pred_weight_table.luma_log2_weight_denom = sl->pwt.luma_log2_weight_denom;
 
+    av_log(avctx, AV_LOG_DEBUG, "%s: list_count=%d slice type %d\n", __func__, sl->list_count, ff_h264_get_slice_type(sl));
+
+    av_log(avctx, AV_LOG_DEBUG, "%s: %d refs\n", __func__, sl->ref_count[0]);
     count = sl->list_count > 0 ? sl->ref_count[0] : 0;
-    for (i = 0; i < count; i++)
-        controls->slice_params.ref_pic_list0[i] = get_dpb_index(&controls->decode_params, &sl->ref_list[0][i]);
+    for (i = 0; i < count; i++) {
+	int dpb_idx = get_dpb_index(&controls->decode_params, &sl->ref_list[0][i]);
+	av_log(avctx, AV_LOG_DEBUG, "%s: dpb_idx=%d\n", __func__, dpb_idx);
+        controls->slice_params.ref_pic_list0[i] = dpb_idx; 
+    }
+    for (i = count; i < 32; i++)
+        controls->slice_params.ref_pic_list0[i] = 0xff;
     if (count)
         fill_weight_factors(&controls->slice_params.pred_weight_table.weight_factors[0], 0, sl);
 
+    av_log(avctx, AV_LOG_DEBUG, "%s: %d refs\n", __func__, sl->ref_count[1]);
     count = sl->list_count > 1 ? sl->ref_count[1] : 0;
-    for (i = 0; i < count; i++)
+    for (i = 0; i < count; i++) {
+	int dpb_idx = get_dpb_index(&controls->decode_params, &sl->ref_list[1][i]);
+	av_log(avctx, AV_LOG_DEBUG, "%s: dpb_idx=%d\n", __func__, dpb_idx);
         controls->slice_params.ref_pic_list1[i] = get_dpb_index(&controls->decode_params, &sl->ref_list[1][i]);
+    }
+    for (i = count; i < 32; i++)
+        controls->slice_params.ref_pic_list1[i] = 0xff;
     if (count)
         fill_weight_factors(&controls->slice_params.pred_weight_table.weight_factors[1], 1, sl);
 
+    ret = ff_v4l2_request_append_output_buffer(avctx, h->cur_pic_ptr->f, nalu_slice_start_code, 4);
+    if (ret)
+	    return ret;
     return ff_v4l2_request_append_output_buffer(avctx, h->cur_pic_ptr->f, buffer, size);
 }
 
