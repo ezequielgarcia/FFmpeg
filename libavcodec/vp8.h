@@ -257,6 +257,7 @@ typedef struct VP8Context {
         uint32_t value;
         int bit_count;
     } coder_state_at_header_end;
+    int macroblock_bit_offset;
 
     int header_partition_size;
 

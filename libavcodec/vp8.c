@@ -176,6 +176,9 @@ static enum AVPixelFormat get_pixel_format(VP8Context *s)
 #if CONFIG_VP8_NVDEC_HWACCEL
         AV_PIX_FMT_CUDA,
 #endif
+#if CONFIG_VP8_V4L2REQUEST_HWACCEL
+	AV_PIX_FMT_DRM_PRIME,
+#endif
         AV_PIX_FMT_YUV420P,
         AV_PIX_FMT_NONE,
     };
@@ -830,6 +833,7 @@ static int vp8_decode_frame_header(VP8Context *s, const uint8_t *buf, int buf_si
     s->coder_state_at_header_end.range     = s->c.high;
     s->coder_state_at_header_end.value     = s->c.code_word >> 16;
     s->coder_state_at_header_end.bit_count = -s->c.bits % 8;
+    s->macroblock_bit_offset = -s->c.bits;
 
     return 0;
 }
@@ -2969,6 +2973,9 @@ AVCodec ff_vp8_decoder = {
 #endif
 #if CONFIG_VP8_NVDEC_HWACCEL
                                HWACCEL_NVDEC(vp8),
+#endif
+#if CONFIG_VP8_V4L2REQUEST_HWACCEL
+                               HWACCEL_V4L2REQUEST(vp8),
 #endif
                                NULL
                            },
