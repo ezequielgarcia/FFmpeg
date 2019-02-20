@@ -1703,6 +1703,7 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
     slice_type         = ff_h264_golomb_to_pict_type[slice_type];
     sl->slice_type     = slice_type;
     sl->slice_type_nos = slice_type & 3;
+    sl->idr_pic_flag   = !!(nal->type == H264_NAL_IDR_SLICE);
 
     if (nal->type  == H264_NAL_IDR_SLICE &&
         sl->slice_type_nos != AV_PICTURE_TYPE_I) {
@@ -1767,8 +1768,8 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
         sl->max_pic_num  = 1 << (sps->log2_max_frame_num + 1);
     }
 
-    if (nal->type == H264_NAL_IDR_SLICE)
-        get_ue_golomb_long(&sl->gb); /* idr_pic_id */
+    if (sl->idr_pic_flag)
+        sl->idr_pic_id = get_ue_golomb_long(&sl->gb);
 
     if (sps->poc_type == 0) {
         sl->poc_lsb = get_bits(&sl->gb, sps->log2_max_poc_lsb);
