@@ -246,6 +246,202 @@ static int v4l2_request_h264_end_frame(AVCodecContext *avctx)
     return ff_v4l2_request_decode_frame(avctx, h->cur_pic_ptr->f, control, FF_ARRAY_ELEMS(control));
 }
 
+
+static void pic_as_field(H264Ref *pic, const int parity)
+{
+    int i;
+    for (i = 0; i < FF_ARRAY_ELEMS(pic->data); ++i) {
+        if (parity == PICT_BOTTOM_FIELD)
+            pic->data[i]   += pic->linesize[i];
+        pic->reference      = parity;
+        pic->linesize[i] *= 2;
+    }
+    pic->poc = pic->parent->field_poc[parity == PICT_BOTTOM_FIELD];
+}
+
+static void ref_from_h264pic(H264Ref *dst, H264Picture *src)
+{
+    memcpy(dst->data,     src->f->data,     sizeof(dst->data));
+    memcpy(dst->linesize, src->f->linesize, sizeof(dst->linesize));
+    dst->reference = src->reference;
+    dst->poc       = src->poc;
+    dst->pic_id    = src->pic_id;
+    dst->parent = src;
+}
+
+static int split_field_copy(H264Ref *dest, H264Picture *src, int parity, int id_add)
+{
+    int match = !!(src->reference & parity);
+
+    if (match) {
+        ref_from_h264pic(dest, src);
+        if (parity != PICT_FRAME) {
+            pic_as_field(dest, parity);
+            dest->pic_id *= 2;
+            dest->pic_id += id_add;
+        }
+    }
+
+    return match;
+}
+
+static int build_def_list(H264Ref *def, int def_len,
+                          H264Picture * const *in, int len, int is_long, int sel)
+{
+    int  i[2] = { 0 };
+    int index = 0;
+
+    while (i[0] < len || i[1] < len) {
+        while (i[0] < len && !(in[i[0]] && (in[i[0]]->reference & sel)))
+            i[0]++;
+        while (i[1] < len && !(in[i[1]] && (in[i[1]]->reference & (sel ^ 3))))
+            i[1]++;
+        if (i[0] < len) {
+            av_assert0(index < def_len);
+            in[i[0]]->pic_id = is_long ? i[0] : in[i[0]]->frame_num;
+            split_field_copy(&def[index++], in[i[0]++], sel, 1);
+        }
+        if (i[1] < len) {
+            av_assert0(index < def_len);
+            in[i[1]]->pic_id = is_long ? i[1] : in[i[1]]->frame_num;
+            split_field_copy(&def[index++], in[i[1]++], sel ^ 3, 0);
+        }
+    }
+
+    return index;
+}
+
+static int add_sorted(H264Picture **sorted, H264Picture * const *src,
+                      int len, int limit, int dir)
+{
+    int i, best_poc;
+    int out_i = 0;
+
+    for (;;) {
+        best_poc = dir ? INT_MIN : INT_MAX;
+
+        for (i = 0; i < len; i++) {
+            const int poc = src[i]->poc;
+            if (((poc > limit) ^ dir) && ((poc < best_poc) ^ dir)) {
+                best_poc      = poc;
+                sorted[out_i] = src[i];
+            }
+        }
+        if (best_poc == (dir ? INT_MIN : INT_MAX))
+            break;
+        limit = sorted[out_i++]->poc - dir;
+    }
+    return out_i;
+}
+
+static void h264_init_ref_list_p(const H264Context *h, const H264SliceContext *sl, H264Ref *ref_list, int ref_list_len)
+{
+    int len;
+
+    len  = build_def_list(ref_list, ref_list_len,
+                          h->short_ref, h->short_ref_count, 0, h->picture_structure);
+    len += build_def_list(ref_list + len, ref_list_len - len,
+                          h->long_ref, 16, 1, h->picture_structure);
+    av_assert0(len <= 32);
+    if (len < sl->ref_count[0])
+        memset(&ref_list[len], 0, sizeof(H264Ref) * (sl->ref_count[0] - len));
+
+}
+
+static void h264_init_ref_list_b(const H264Context *h, const H264SliceContext *sl,
+                                 H264Ref *ref_list0, int ref_list0_len,
+                                 H264Ref *ref_list1, int ref_list1_len)
+{
+    H264Picture *sorted[32];
+    int cur_poc, len, i;
+    int lens[2];
+
+    if (FIELD_PICTURE(h))
+        cur_poc = h->cur_pic_ptr->field_poc[h->picture_structure == PICT_BOTTOM_FIELD];
+    else
+        cur_poc = h->cur_pic_ptr->poc;
+
+    /* list 0 */
+    len  = add_sorted(sorted,       h->short_ref, h->short_ref_count, cur_poc, 1 ^ 0);
+    len += add_sorted(sorted + len, h->short_ref, h->short_ref_count, cur_poc, 0 ^ 0);
+    av_assert0(len <= 32);
+
+    len  = build_def_list(ref_list0, ref_list0_len,
+                          sorted, len, 0, h->picture_structure);
+    len += build_def_list(ref_list0 + len,
+                          ref_list0_len - len,
+                          h->long_ref, 16, 1, h->picture_structure);
+    av_assert0(len <= 32);
+
+    if (len < sl->ref_count[0])
+        memset(&ref_list0[len], 0, sizeof(H264Ref) * (sl->ref_count[0] - len));
+    lens[0] = len;
+
+    /* list 1 */
+    len  = add_sorted(sorted,       h->short_ref, h->short_ref_count, cur_poc, 1 ^ 1);
+    len += add_sorted(sorted + len, h->short_ref, h->short_ref_count, cur_poc, 0 ^ 1);
+    av_assert0(len <= 32);
+
+    len  = build_def_list(ref_list1, ref_list1_len,
+                          sorted, len, 0, h->picture_structure);
+    len += build_def_list(ref_list1 + len,
+                          ref_list1_len - len,
+                          h->long_ref, 16, 1, h->picture_structure);
+    av_assert0(len <= 32);
+
+    if (len < sl->ref_count[1])
+        memset(&ref_list1[len], 0, sizeof(H264Ref) * (sl->ref_count[1] - len));
+    lens[1] = len;
+
+    if (lens[0] == lens[1] && lens[1] > 1) {
+        for (i = 0; i < lens[0] &&
+                    ref_list0[i].parent->f->buf[0]->buffer ==
+                    ref_list1[i].parent->f->buf[0]->buffer; i++);
+        if (i == lens[0]) {
+            FFSWAP(H264Ref, ref_list1[0], ref_list1[1]);
+        }
+    }
+}
+
+static void build_slice_ref_list(const H264SliceContext *sl, V4L2RequestControlsH264 *controls,
+                                 const H264Ref *ref_list, unsigned char *ref_pic_list, int count)
+{
+    int i = 0;
+
+    for (; i < count; i++) {
+	int dpb_idx = get_dpb_index(&controls->decode_params, &ref_list[i]);
+        ref_pic_list[i] = dpb_idx; 
+    }
+    for (; i < 32; i++)
+        ref_pic_list[i] = 0xff;
+    if (count)
+        fill_weight_factors(&controls->slice_params.pred_weight_table.weight_factors[0], 0, sl);
+}
+
+static void build_init_ref_list(const H264SliceContext *sl, V4L2RequestControlsH264 *controls,
+                                const H264Ref *ref_list, unsigned char *ref_pic_list, int count)
+{
+    int i = 0;
+
+    for (; i < count; i++) {
+	int dpb_idx = get_dpb_index(&controls->decode_params, &ref_list[i]);
+        ref_pic_list[i] = dpb_idx; 
+    }
+    for (; i < 32; i++)
+        ref_pic_list[i] = 0xff;
+}
+
+static void dump_ref_list(AVCodecContext *avctx, int ref_count, H264Ref *ref_list)
+{
+    int i;
+    for (i = 0; i < ref_count; i++) {
+        av_log(avctx, AV_LOG_ERROR, "\t%s fn:%d 0x%p,\n",
+                (ref_list[i].parent ? (ref_list[i].parent->long_ref ? "long" : "short") : "??"),
+                ref_list[i].pic_id,
+                ref_list[i].data[0]);
+    }
+}
+
 static int v4l2_request_h264_decode_slice(AVCodecContext *avctx, const uint8_t *buffer, uint32_t size)
 {
     const H264Context *h = avctx->priv_data;
@@ -253,7 +449,10 @@ static int v4l2_request_h264_decode_slice(AVCodecContext *avctx, const uint8_t *
     const H264SliceContext *sl = &h->slice_ctx[0];
     V4L2RequestControlsH264 *controls = h->cur_pic_ptr->hwaccel_picture_private;
     V4L2RequestDescriptor *req = (V4L2RequestDescriptor*)h->cur_pic_ptr->f->data[0];
-    int i, count, ret;
+    H264Ref ref_pic_p[32];
+    H264Ref ref_pic_b0[32];
+    H264Ref ref_pic_b1[32];
+    int ret, count0, count1;
 
     // HACK: trigger decode per slice
     if (req->output.used) {
@@ -274,7 +473,7 @@ static int v4l2_request_h264_decode_slice(AVCodecContext *avctx, const uint8_t *
         .pic_parameter_set_id = sl->pps_id,
         .colour_plane_id = 0, /* what is this? */
         .frame_num = h->poc.frame_num,
-        .idr_pic_id = 0, /* what is this? */
+        .idr_pic_id = sl->idr_pic_id, /* will be used by rk3288 */
         .pic_order_cnt_lsb = sl->poc_lsb,
         .delta_pic_order_cnt_bottom = sl->delta_poc_bottom,
         .delta_pic_order_cnt0 = sl->delta_poc[0],
@@ -298,6 +497,9 @@ static int v4l2_request_h264_decode_slice(AVCodecContext *avctx, const uint8_t *
         .num_ref_idx_l1_active_minus1 = sl->list_count > 1 ? sl->ref_count[1] - 1 : 0,
     };
 
+    /* XXX Maybe this is too much, and should instead be moved to the driver? */
+    assert(!FIELD_PICTURE(h));
+
     if (FIELD_PICTURE(h))
         controls->slice_params.flags |= V4L2_H264_SLICE_FLAG_FIELD_PIC;
     if (h->picture_structure == PICT_BOTTOM_FIELD)
@@ -308,32 +510,25 @@ static int v4l2_request_h264_decode_slice(AVCodecContext *avctx, const uint8_t *
     controls->slice_params.pred_weight_table.chroma_log2_weight_denom = sl->pwt.chroma_log2_weight_denom;
     controls->slice_params.pred_weight_table.luma_log2_weight_denom = sl->pwt.luma_log2_weight_denom;
 
-    av_log(avctx, AV_LOG_DEBUG, "%s: list_count=%d slice type %d\n", __func__, sl->list_count, ff_h264_get_slice_type(sl));
+    count0 = sl->list_count > 0 ? sl->ref_count[0] : 0;
+    count1 = sl->list_count > 1 ? sl->ref_count[1] : 0;
+    build_slice_ref_list(sl, controls, sl->ref_list[0], controls->slice_params.ref_pic_list0, count0);
+    build_slice_ref_list(sl, controls, sl->ref_list[1], controls->slice_params.ref_pic_list1, count1);
 
-    av_log(avctx, AV_LOG_DEBUG, "%s: %d refs\n", __func__, sl->ref_count[0]);
-    count = sl->list_count > 0 ? sl->ref_count[0] : 0;
-    for (i = 0; i < count; i++) {
-	int dpb_idx = get_dpb_index(&controls->decode_params, &sl->ref_list[0][i]);
-	av_log(avctx, AV_LOG_DEBUG, "%s: dpb_idx=%d\n", __func__, dpb_idx);
-        controls->slice_params.ref_pic_list0[i] = dpb_idx; 
-    }
-    for (i = count; i < 32; i++)
-        controls->slice_params.ref_pic_list0[i] = 0xff;
-    if (count)
-        fill_weight_factors(&controls->slice_params.pred_weight_table.weight_factors[0], 0, sl);
+    h264_init_ref_list_p(h, sl, ref_pic_p, 32);
+    h264_init_ref_list_b(h, sl, ref_pic_b0, 32, ref_pic_b1, 32);
+    build_init_ref_list(sl, controls, ref_pic_p, controls->decode_params.ref_pic_list_p0, count0);
+    build_init_ref_list(sl, controls, ref_pic_b0, controls->decode_params.ref_pic_list_b0, count0);
+    build_init_ref_list(sl, controls, ref_pic_b1, controls->decode_params.ref_pic_list_b1, count1);
 
-    av_log(avctx, AV_LOG_DEBUG, "%s: %d refs\n", __func__, sl->ref_count[1]);
-    count = sl->list_count > 1 ? sl->ref_count[1] : 0;
-    for (i = 0; i < count; i++) {
-	int dpb_idx = get_dpb_index(&controls->decode_params, &sl->ref_list[1][i]);
-	av_log(avctx, AV_LOG_DEBUG, "%s: dpb_idx=%d\n", __func__, dpb_idx);
-        controls->slice_params.ref_pic_list1[i] = get_dpb_index(&controls->decode_params, &sl->ref_list[1][i]);
-    }
-    for (i = count; i < 32; i++)
-        controls->slice_params.ref_pic_list1[i] = 0xff;
-    if (count)
-        fill_weight_factors(&controls->slice_params.pred_weight_table.weight_factors[1], 1, sl);
+    av_log(avctx, AV_LOG_ERROR, "List P:\n");
+    dump_ref_list(avctx, sl->ref_count[0], ref_pic_p);
+    av_log(avctx, AV_LOG_ERROR, "List B0:\n");
+    dump_ref_list(avctx, sl->ref_count[1], ref_pic_b0);
+    av_log(avctx, AV_LOG_ERROR, "List B1:\n");
+    dump_ref_list(avctx, sl->ref_count[1], ref_pic_b1);
 
+    /* XXX only needed if pixel format says so, this needs a rework here */
     ret = ff_v4l2_request_append_output_buffer(avctx, h->cur_pic_ptr->f, nalu_slice_start_code, 4);
     if (ret)
 	    return ret;
