@@ -19,7 +19,7 @@
 #ifndef AVCODEC_V4L2_REQUEST_H
 #define AVCODEC_V4L2_REQUEST_H
 
-#include <linux/videodev2.h>
+#include "videodev2.h"
 
 #include "libavutil/hwcontext_drm.h"
 

@@ -17,15 +17,18 @@
  */
 
 #include <drm_fourcc.h>
-#include <linux/media.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <unistd.h>
 
 #include "decode.h"
 #include "internal.h"
 #include "v4l2_request.h"
+#include "media.h"
+#include "videodev2.h"
 
 #define V4L2_REQUEST_VIDEO_PATH "/dev/video0"
 #define V4L2_REQUEST_MEDIA_PATH "/dev/media0"
