@@ -92,7 +92,7 @@ static uint8_t get_dpb_index(struct v4l2_ctrl_h264_decode_param *decode, const H
     uint64_t timestamp;
 
     if (!ref->parent)
-        return 0;
+        return 0xff;
 
     timestamp = ff_v4l2_request_get_capture_timestamp(ref->parent->f);
 
@@ -103,7 +103,7 @@ static uint8_t get_dpb_index(struct v4l2_ctrl_h264_decode_param *decode, const H
             return i;
     }
 
-    return 0;
+    return 0xff;
 }
 
 static void fill_sps(struct v4l2_ctrl_h264_sps *ctrl, const H264Context *h)
